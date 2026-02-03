@@ -17,10 +17,6 @@
 #include "dialog.h"
 #include "so_util.h"
 
-#ifndef SCE_KERNEL_MEMBLOCK_TYPE_USER_RX
-#define SCE_KERNEL_MEMBLOCK_TYPE_USER_RX                 (0x0C20D050)
-#endif
-
 typedef struct b_enc {
 	union {
 		struct __attribute__((__packed__)) {
@@ -67,8 +63,7 @@ so_hook hook_thumb(uintptr_t addr, uintptr_t dst) {
 	h.thumb_addr = addr;
 	addr &= ~1;
 	if (addr & 2) {
-		uint16_t nop = 0xbf00;
-		kuKernelCpuUnrestrictedMemcpy((void *)addr, &nop, sizeof(nop));
+		*(uint16_t *)addr = 0xbf00; // nop
 		addr += 2;
 		sceClibPrintf("THUMB UNALIGNED\n");
 	}
@@ -76,8 +71,8 @@ so_hook hook_thumb(uintptr_t addr, uintptr_t dst) {
 	h.addr = addr;
 	h.patch_instr[0] = 0xf000f8df; // LDR PC, [PC]
 	h.patch_instr[1] = dst;
-	kuKernelCpuUnrestrictedMemcpy(&h.orig_instr, (void *)addr, sizeof(h.orig_instr));
-	kuKernelCpuUnrestrictedMemcpy((void *)addr, h.patch_instr, sizeof(h.patch_instr));
+	sceClibMemcpy(&h.orig_instr, (void *)addr, sizeof(h.orig_instr));
+	sceClibMemcpy((void *)addr, h.patch_instr, sizeof(h.patch_instr));
 
 	return h;
 }
@@ -93,8 +88,8 @@ so_hook hook_arm(uintptr_t addr, uintptr_t dst) {
 	h.addr = addr;
 	h.patch_instr[0] = 0xe51ff004; // LDR PC, [PC, #-0x4]
 	h.patch_instr[1] = dst;
-	kuKernelCpuUnrestrictedMemcpy(&h.orig_instr, (void *)addr, sizeof(h.orig_instr));
-	kuKernelCpuUnrestrictedMemcpy((void *)addr, h.patch_instr, sizeof(h.patch_instr));
+	sceClibMemcpy(&h.orig_instr, (void *)addr, sizeof(h.orig_instr));
+	sceClibMemcpy((void *)addr, h.patch_instr, sizeof(h.patch_instr));
 
 	return h;
 }
@@ -139,15 +134,16 @@ int _so_load(so_module *mod, SceUID so_blockid, void *so_data, uintptr_t load_ad
 				// Sits exactly under the desired allocation space
 				mod->patch_size = ALIGN_MEM(PATCH_SZ, mod->phdr[i].p_align);
 				SceKernelAllocMemBlockKernelOpt opt;
-				memset(&opt, 0, sizeof(SceKernelAllocMemBlockKernelOpt));
+				sceClibMemset(&opt, 0, sizeof(SceKernelAllocMemBlockKernelOpt));
 				opt.size = sizeof(SceKernelAllocMemBlockKernelOpt);
 				opt.attr = 0x1;
 				opt.field_C = (SceUInt32)load_addr - mod->patch_size;
-				res = mod->patch_blockid = kuKernelAllocMemBlock("rx_block", SCE_KERNEL_MEMBLOCK_TYPE_USER_RX, mod->patch_size, &opt);
+				res = mod->patch_blockid = kuKernelAllocMemBlock("rwx_block", SCE_KERNEL_MEMBLOCK_TYPE_USER_RW, mod->patch_size, &opt);
 				if (res < 0)
 					goto err_free_so;
 
 				sceKernelGetMemBlockBase(mod->patch_blockid, &mod->patch_base);
+				kuKernelMemProtect(mod->patch_base, mod->patch_size, KU_KERNEL_PROT_EXEC | KU_KERNEL_PROT_WRITE | KU_KERNEL_PROT_READ);
 				mod->patch_head = mod->patch_base;
 				
 				prog_size = ALIGN_MEM(mod->phdr[i].p_memsz + mod->phdr[i].p_vaddr - (data_addr - load_addr), mod->phdr[i].p_align);
@@ -155,16 +151,17 @@ int _so_load(so_module *mod, SceUID so_blockid, void *so_data, uintptr_t load_ad
 				mod->phdr[i].p_vaddr += (Elf32_Addr)load_addr;
 				//sceClibPrintf("Text segment: vaddr: %x (data addr: %x) size: %u\n", mod->phdr[i].p_vaddr, data_addr, mod->phdr[i].p_memsz);
 
-				memset(&opt, 0, sizeof(SceKernelAllocMemBlockKernelOpt));
+				sceClibMemset(&opt, 0, sizeof(SceKernelAllocMemBlockKernelOpt));
 				opt.size = sizeof(SceKernelAllocMemBlockKernelOpt);
 				opt.attr = 0x1;
 				opt.field_C = data_addr;
-				res = mod->text_blockid = kuKernelAllocMemBlock("rx_block", SCE_KERNEL_MEMBLOCK_TYPE_USER_RX, prog_size, &opt);
+				res = mod->text_blockid = kuKernelAllocMemBlock("rwx_block", SCE_KERNEL_MEMBLOCK_TYPE_USER_RW, prog_size, &opt);
 				if (res < 0)
 					goto err_free_so;
 				
 				sceKernelGetMemBlockBase(mod->text_blockid, &prog_data);
-
+				kuKernelMemProtect(prog_data, prog_size, KU_KERNEL_PROT_EXEC | KU_KERNEL_PROT_WRITE | KU_KERNEL_PROT_READ);
+				
 				mod->text_base = mod->phdr[i].p_vaddr;
 				mod->text_size = mod->phdr[i].p_memsz;
 		
@@ -203,12 +200,8 @@ int _so_load(so_module *mod, SceUID so_blockid, void *so_data, uintptr_t load_ad
 				mod->n_data++;
 			}
 
-			char *zero = malloc(prog_size - mod->phdr[i].p_filesz);
-			memset(zero, 0, prog_size - mod->phdr[i].p_filesz);
-			kuKernelCpuUnrestrictedMemcpy(prog_data + mod->phdr[i].p_filesz, zero, prog_size - mod->phdr[i].p_filesz);
-			free(zero);
-
-			kuKernelCpuUnrestrictedMemcpy((void *)mod->phdr[i].p_vaddr, (void *)((uintptr_t)so_data + mod->phdr[i].p_offset), mod->phdr[i].p_filesz);
+			sceClibMemset(prog_data + mod->phdr[i].p_filesz, 0, prog_size - mod->phdr[i].p_filesz);
+			sceClibMemcpy((void *)mod->phdr[i].p_vaddr, (void *)((uintptr_t)so_data + mod->phdr[i].p_offset), mod->phdr[i].p_filesz);
 		}
 	}
 
@@ -332,23 +325,20 @@ int so_relocate(so_module *mod) {
 		switch (type) {
 		case R_ARM_ABS32:
 			if (sym->st_shndx != SHN_UNDEF) {
-				val = *ptr + mod->load_addr + sym->st_value;
 				//sceClibPrintf("R_ARM_ABS32 %x -> %x\n", ptr, val);
-				kuKernelCpuUnrestrictedMemcpy(ptr, &val, sizeof(uintptr_t));
+				*ptr += mod->load_addr + sym->st_value;
 			}
 			break;
 		case R_ARM_RELATIVE:
-			val = *ptr + mod->load_addr;
 			//sceClibPrintf("R_ARM_RELATIVE %x -> %x\n", ptr, val);
-			kuKernelCpuUnrestrictedMemcpy(ptr, &val, sizeof(uintptr_t));
+			*ptr += mod->load_addr;
 			break;
 		case R_ARM_GLOB_DAT:
 		case R_ARM_JUMP_SLOT:
 		{
 			if (sym->st_shndx != SHN_UNDEF) {
-				val = mod->load_addr + sym->st_value;
 				//sceClibPrintf("R_ARM_JUMP_SLOT %x -> %x\n", ptr, val);
-				kuKernelCpuUnrestrictedMemcpy(ptr, &val, sizeof(uintptr_t));
+				*ptr = mod->load_addr + sym->st_value;
 			}
 			break;
 		}
@@ -638,8 +628,8 @@ static void trampoline_ldm(so_module *mod, uint32_t *dst) {
 	// Create sign extended relative address rel_addr
 	trampoline[0] = B(dst, patch_addr).raw;
 
-	kuKernelCpuUnrestrictedMemcpy((void*)patch_addr, funct, trampoline_sz);
-	kuKernelCpuUnrestrictedMemcpy(dst, trampoline, sizeof(trampoline));
+	sceClibMemcpy((void*)patch_addr, funct, trampoline_sz);
+	sceClibMemcpy(dst, trampoline, sizeof(trampoline));
 }
 
 uintptr_t so_symbol(so_module *mod, const char *symbol) {
