@@ -1,4 +1,4 @@
-/* so_util.c -- utils to load and hook .so modules
+/* so_util.c — utils to load and hook .so modules
  *
  * Copyright (C) 2021 Andy Nguyen
  *
@@ -16,6 +16,16 @@
 #include <psp2/kernel/clib.h>
 
 #include <kubridge.h>
+
+// Uncomment for verbose logging:
+//#define SO_UTIL_VERBOSE 1
+
+#define SO_UTIL_LOG_CRITICAL sceClibPrintf
+#ifdef SO_UTIL_VERBOSE
+#define SO_UTIL_LOG_VERBOSE sceClibPrintf
+#else
+#define SO_UTIL_LOG_VERBOSE
+#endif
 
 typedef struct b_enc {
 	union {
@@ -52,6 +62,8 @@ typedef struct ldst_enc {
 #define B(PC, DEST) ((b_enc){.bits = {.cond = 0b1110, .enc = 0b101, .l = 0, .imm24 = (((intptr_t)DEST-(intptr_t)PC) / 4) - 2}})
 #define LDR_OFFS(RT, RN, IMM) ((ldst_enc){.bits = {.cond = 0b1110, .enc = 0b010, .p = 1, .u = (IMM >= 0), .b = 0, .w = 0, .bit20_1 = 1, .rn = RN, .rt = RT, .imm12 = (IMM >= 0) ? IMM : -IMM}})
 
+#define ALIGN_MEM(x, align) (((x) + ((align) - 1)) & ~((align) - 1))
+
 #define PATCH_SZ 0x10000 //64 KB-ish arenas
 static so_module *head = NULL, *tail = NULL;
 
@@ -61,7 +73,7 @@ static int _so_util_ret0(void) {
 
 so_hook hook_thumb(uintptr_t addr, uintptr_t dst) {
 	so_hook h = {0};
-	sceClibPrintf("THUMB HOOK\n");
+	SO_UTIL_LOG_VERBOSE("THUMB HOOK\n");
 	if (addr == 0)
 		return h;
 	h.thumb_addr = addr;
@@ -69,7 +81,7 @@ so_hook hook_thumb(uintptr_t addr, uintptr_t dst) {
 	if (addr & 2) {
 		*(uint16_t *)addr = 0xbf00; // nop
 		addr += 2;
-		sceClibPrintf("THUMB UNALIGNED\n");
+		SO_UTIL_LOG_VERBOSE("THUMB UNALIGNED\n");
 	}
 	
 	h.addr = addr;
@@ -82,7 +94,7 @@ so_hook hook_thumb(uintptr_t addr, uintptr_t dst) {
 }
 
 so_hook hook_arm(uintptr_t addr, uintptr_t dst) {
-	sceClibPrintf("ARM HOOK\n");
+	SO_UTIL_LOG_VERBOSE("ARM HOOK\n");
 	so_hook h = {0};
 	if (addr == 0) {
 		return h;
@@ -105,10 +117,19 @@ so_hook hook_addr(uintptr_t addr, uintptr_t dst) {
 }
 
 void so_flush_caches(const so_module *mod) {
-	//sceClibPrintf("Flushing cache on addr: %x size: %u\n", mod->text_base, mod->text_size);
+	SO_UTIL_LOG_VERBOSE("Flushing cache on addr: %x size: %u\n", mod->text_base, mod->text_size);
 	kuKernelFlushCaches((void *)mod->text_base, mod->text_size);
 }
 
+/**
+ * @brief Core ELF loader shared by `so_file_load()` and `so_mem_load()`.
+ *
+ * @param mod         Output module struct to populate.
+ * @param so_blockid  SceUID of the memory block holding the raw .so image.
+ * @param so_data     Pointer to the raw .so image.
+ * @param load_addr   Desired virtual address for the text segment.
+ * @return            0 on success; <0 on failure.
+ */
 static int so_load_internal(so_module *mod, SceUID so_blockid, void *so_data, uintptr_t load_addr) {
 	int res = 0;
 	uintptr_t data_addr = load_addr;
@@ -126,14 +147,14 @@ static int so_load_internal(so_module *mod, SceUID so_blockid, void *so_data, ui
 	mod->shstr = (char *)((uintptr_t)so_data + mod->shdr[mod->ehdr->e_shstrndx].sh_offset);
 
 	for (int i = 0; i < mod->ehdr->e_phnum; i++) {
-		//sceClibPrintf("segment %d: type: %x flags: %x\n", i, mod->phdr[i].p_type, mod->phdr[i].p_flags);
+		SO_UTIL_LOG_VERBOSE("segment %d: type: %x flags: %x\n", i, mod->phdr[i].p_type, mod->phdr[i].p_flags);
 		
 		if (mod->phdr[i].p_type == PT_LOAD) {
 			void *prog_data;
 			size_t prog_size;
 			
 			if ((mod->phdr[i].p_flags & PF_X) == PF_X) {
-				// Allocate arena for code patches, trampolines, etc
+				// Allocate arena for code patches, trampolines, etc.
 				// Sits exactly under the desired allocation space
 				mod->patch_size = ALIGN_MEM(PATCH_SZ, mod->phdr[i].p_align);
 				SceKernelAllocMemBlockKernelOpt opt;
@@ -152,7 +173,7 @@ static int so_load_internal(so_module *mod, SceUID so_blockid, void *so_data, ui
 				prog_size = ALIGN_MEM(mod->phdr[i].p_memsz + mod->phdr[i].p_vaddr - (data_addr - load_addr), mod->phdr[i].p_align);
 				
 				mod->phdr[i].p_vaddr += (Elf32_Addr)load_addr;
-				//sceClibPrintf("Text segment: vaddr: %x (data addr: %x) size: %u\n", mod->phdr[i].p_vaddr, data_addr, mod->phdr[i].p_memsz);
+				SO_UTIL_LOG_VERBOSE("Text segment: vaddr: %x (data addr: %x) size: %u\n", mod->phdr[i].p_vaddr, data_addr, mod->phdr[i].p_memsz);
 
 				sceClibMemset(&opt, 0, sizeof(SceKernelAllocMemBlockKernelOpt));
 				opt.size = sizeof(SceKernelAllocMemBlockKernelOpt);
@@ -174,7 +195,7 @@ static int so_load_internal(so_module *mod, SceUID so_blockid, void *so_data, ui
 				mod->cave_base = mod->cave_head = mod->phdr[i].p_vaddr + mod->phdr[i].p_memsz;
 				mod->cave_base = ALIGN_MEM(mod->cave_base, 0x4);
 				mod->cave_head = mod->cave_base;
-				//sceClibPrintf("code cave: %d bytes (@0x%08X).\n", mod->cave_size, mod->cave_base);
+				SO_UTIL_LOG_VERBOSE("code cave: %d bytes (@0x%08X).\n", mod->cave_size, mod->cave_base);
 			
 				data_addr = (uintptr_t)prog_data + prog_size;
 			} else {
@@ -184,7 +205,7 @@ static int so_load_internal(so_module *mod, SceUID so_blockid, void *so_data, ui
 				prog_size = ALIGN_MEM(mod->phdr[i].p_memsz + mod->phdr[i].p_vaddr - (data_addr - load_addr), mod->phdr[i].p_align);
 				
 				mod->phdr[i].p_vaddr += load_addr;
-				//sceClibPrintf("Data segment: vaddr: %x (data addr: %x) size: %u\n", mod->phdr[i].p_vaddr, data_addr, mod->phdr[i].p_memsz);
+				SO_UTIL_LOG_VERBOSE("Data segment: vaddr: %x (data addr: %x) size: %u\n", mod->phdr[i].p_vaddr, data_addr, mod->phdr[i].p_memsz);
 				
 				SceKernelAllocMemBlockKernelOpt opt = {0};
 				opt.size = sizeof(SceKernelAllocMemBlockKernelOpt);
@@ -233,11 +254,8 @@ static int so_load_internal(so_module *mod, SceUID so_blockid, void *so_data, ui
 		}
 	}
 
-	if (mod->dynamic == NULL ||
-		mod->dynstr == NULL ||
-		mod->dynsym == NULL ||
-		mod->reldyn == NULL ||
-		mod->relplt == NULL) {
+	if (mod->dynamic == NULL || mod->dynstr == NULL || mod->dynsym == NULL ||
+		mod->reldyn == NULL || mod->relplt == NULL) {
 		res = -2;
 		goto err_free_data;
 	}
@@ -322,19 +340,16 @@ int so_relocate(const so_module *mod) {
 		switch (type) {
 		case R_ARM_ABS32:
 			if (sym->st_shndx != SHN_UNDEF) {
-				//sceClibPrintf("R_ARM_ABS32 %x -> %x\n", ptr, val);
 				*ptr += mod->load_addr + sym->st_value;
 			}
 			break;
 		case R_ARM_RELATIVE:
-			//sceClibPrintf("R_ARM_RELATIVE %x -> %x\n", ptr, val);
 			*ptr += mod->load_addr;
 			break;
 		case R_ARM_GLOB_DAT:
 		case R_ARM_JUMP_SLOT:
 		{
 			if (sym->st_shndx != SHN_UNDEF) {
-				//sceClibPrintf("R_ARM_JUMP_SLOT %x -> %x\n", ptr, val);
 				*ptr = mod->load_addr + sym->st_value;
 			}
 			break;
@@ -342,7 +357,7 @@ int so_relocate(const so_module *mod) {
 		case R_ARM_NONE:
 			break;
 		default:
-			sceClibPrintf("Error unknown relocation type %d\n", type);
+			SO_UTIL_LOG_CRITICAL("Error unknown relocation type %d\n", type);
 			break;
 		}
 	}
@@ -350,6 +365,13 @@ int so_relocate(const so_module *mod) {
 	return 0;
 }
 
+/**
+ * @brief Resolves a symbol by searching the global module list.
+ *
+ * @param mod     Module whose DT_NEEDED list to search.
+ * @param symbol  Name of the symbol to resolve.
+ * @return        Absolute virtual address of the symbol, or 0 if not found.
+ */
 uintptr_t so_resolve_link(const so_module *mod, const char *symbol) {
 	for (uint32_t i = 0; i < mod->num_dynamic; i++) {
 		if (mod->dynamic[i].d_tag == DT_NEEDED) {
@@ -368,6 +390,14 @@ uintptr_t so_resolve_link(const so_module *mod, const char *symbol) {
 	return 0;
 }
 
+/**
+ * @brief Error handler invoked when an unresolved stub is called at runtime.
+ *
+ * Searches the global module list to identify which module owns the missing
+ * symbol and prints it out. Terminates with sceClibAbort(); does not return.
+ *
+ * @param got0  Address of the GOT entry that triggered the unresolved call.
+ */
 __attribute__((noreturn)) void reloc_err(uintptr_t got0)
 {
 	// Find to which module this missing symbol belongs
@@ -390,13 +420,14 @@ __attribute__((noreturn)) void reloc_err(uintptr_t got0)
 			uintptr_t *ptr = (uintptr_t *)(curr->load_addr + rel->r_offset);
 
 			if (ELF32_R_TYPE(rel->r_info) == R_ARM_JUMP_SLOT && got0 == (uintptr_t)ptr) {
-				sceClibPrintf("Unknown symbol \"%s\" (%p).\n", curr->dynstr + sym->st_name, (void*)got0);
+				SO_UTIL_LOG_CRITICAL("Unknown symbol \"%s\" (%p).\n", curr->dynstr + sym->st_name, (void*)got0);
+				sceClibAbort();
+				__builtin_unreachable();
 			}
 		}
 	}
 
-	// Ooops, this shouldn't have happened.
-	sceClibPrintf("Unknown symbol \"???\" (%p).\n", (void*)got0);
+	SO_UTIL_LOG_CRITICAL("Unknown symbol \"???\" (%p).\n", (void*)got0);
 	sceClibAbort();
 	__builtin_unreachable();
 }
@@ -425,7 +456,7 @@ int so_resolve(const so_module *mod, const so_default_dynlib *default_dynlib, in
 				if (!default_dynlib_only) {
 					uintptr_t link = so_resolve_link(mod, mod->dynstr + sym->st_name);
 					if (link) {
-						//sceClibPrintf("Resolved from dependencies: %s\n", mod->dynstr + sym->st_name);
+						SO_UTIL_LOG_VERBOSE("Resolved from dependencies: %s\n", mod->dynstr + sym->st_name);
 						if (type == R_ARM_ABS32)
 							*ptr += link;
 						else
@@ -446,11 +477,11 @@ int so_resolve(const so_module *mod, const so_default_dynlib *default_dynlib, in
 
 				if (!resolved) {
 					if (type == R_ARM_JUMP_SLOT) {
-						sceClibPrintf("Unresolved import: %s\n", mod->dynstr + sym->st_name);
+						SO_UTIL_LOG_CRITICAL("Unresolved import: %s\n", mod->dynstr + sym->st_name);
 						*ptr = (uintptr_t)&plt0_stub;
 					}
 					else {
-						sceClibPrintf("Unresolved import: %s\n", mod->dynstr + sym->st_name);
+						SO_UTIL_LOG_CRITICAL("Unresolved import: %s\n", mod->dynstr + sym->st_name);
 					}
 				}
 			}
@@ -514,6 +545,13 @@ uint32_t so_hash(const uint8_t *name) {
 	return h;
 }
 
+/**
+ * @brief Returns the index of @p symbol in @p mod->dynsym, or -1 if absent.
+ *
+ * @param mod     Module to search.
+ * @param symbol  Name of the symbol to find.
+ * @return        Zero-based index in mod->dynsym, or -1 if not found.
+ */
 static int so_symbol_index(const so_module *mod, const char *symbol)
 {
 	if (mod->hash) {
@@ -539,11 +577,18 @@ static int so_symbol_index(const so_module *mod, const char *symbol)
 	return -1;
 }
 
-/*
- * alloc_arena: allocates space on either patch or cave arenas,
- * range: maximum range from allocation to dst (ignored if NULL)
- * dst: destination address
-*/
+/**
+ * @brief Allocates @p sz bytes from the module's patch or cave arena.
+ *
+ * Tries the patch arena first, then falls back to the code cave.
+ *
+ * @param so     Module whose arenas to allocate from.
+ * @param range  Maximum allowed byte distance from the allocation to @p dst,
+ *               or 0 to ignore the range constraint.
+ * @param dst    Address that the allocation must be reachable from.
+ * @param sz     Number of bytes to allocate.
+ * @return       Address of the allocated block, or 0 if no space is available.
+ */
 static uintptr_t so_alloc_arena(so_module *so, uintptr_t range, uintptr_t dst, size_t sz) {
 	// Is address in range?
 	#define inrange(lsr, gtr, range) \
@@ -565,6 +610,12 @@ static uintptr_t so_alloc_arena(so_module *so, uintptr_t range, uintptr_t dst, s
 	return (uintptr_t)NULL;
 }
 
+/**
+ * @brief Replaces an LDMIA instruction with a trampoline of individual LDRs.
+ *
+ * @param mod  Module whose arena is used to allocate trampoline space.
+ * @param dst  Pointer to the LDMIA word to be replaced.
+ */
 static void trampoline_ldm(so_module *mod, uint32_t *dst) {
 	uint32_t trampoline[1];
 	uint32_t funct[20] = {0xFAFAFAFA};
@@ -578,7 +629,7 @@ static void trampoline_ldm(so_module *mod, uint32_t *dst) {
 	for (int i = 0; i < 16; i++) {
 		if (bitMask & (1 << i)) {
 			// If the register we're reading the offset from is the same as the one we're writing,
-			// delay it to the very end so that the base pointer ins't clobbered
+			// delay it to the very end so that the base pointer isn't clobbered
 			if (baseReg == i)
 				stored = LDR_OFFS(i, baseReg, cur).raw;
 			else
@@ -599,7 +650,7 @@ static void trampoline_ldm(so_module *mod, uint32_t *dst) {
 	uintptr_t patch_addr = so_alloc_arena(mod, B_RANGE, (uintptr_t) B_OFFSET(dst), trampoline_sz);
 
 	if (!patch_addr) {
-		sceClibPrintf("Failed to patch LDMIA at %p, unable to allocate space.\n", dst);
+		SO_UTIL_LOG_CRITICAL("Failed to patch LDMIA at %p, unable to allocate space.\n", dst);
 		return;
 	}
 	
@@ -635,7 +686,7 @@ void so_symbol_fix_ldmia(so_module *mod, const char *symbol) {
 		
 		//Is this an LDMIA instruction with a R0-R12 base register?
 		if (((inst & 0xFFF00000) == 0xE8900000) && (((inst >> 16) & 0xF) < 13) ) {
-			sceClibPrintf("Found possibly misaligned LDMIA on 0x%08X, trying to fix it... (instr: 0x%08X, to 0x%08X)\n", addr, *(uint32_t*)addr, mod->patch_head);
+			SO_UTIL_LOG_CRITICAL("Found possibly misaligned LDMIA on 0x%08X, trying to fix it... (instr: 0x%08X, to 0x%08X)\n", addr, *(uint32_t*)addr, mod->patch_head);
 			trampoline_ldm(mod, (uint32_t *) addr);
 		}
 	}
