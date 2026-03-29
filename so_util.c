@@ -6,16 +6,13 @@
  * of the MIT license.	See the LICENSE file for details.
  */
 
-#include <vitasdk.h>
-#include <kubridge.h>
+#include "so_util.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-#include "main.h"
-#include "dialog.h"
-#include "so_util.h"
+#include <kubridge.h>
 
 typedef struct b_enc {
 	union {
@@ -59,7 +56,7 @@ so_hook hook_thumb(uintptr_t addr, uintptr_t dst) {
 	so_hook h;
 	sceClibPrintf("THUMB HOOK\n");
 	if (addr == 0)
-		return;
+		return h;
 	h.thumb_addr = addr;
 	addr &= ~1;
 	if (addr & 2) {
@@ -521,7 +518,7 @@ int so_resolve_with_dummy(so_module *mod, so_default_dynlib *default_dynlib, int
 
 void so_initialize(so_module *mod) {
 	for (int i = 0; i < mod->num_init_array; i++) {
-		if (mod->init_array[i])
+		if (mod->init_array[i] && (int)mod->init_array[i] != -1)
 			mod->init_array[i]();
 	}
 }
@@ -563,7 +560,7 @@ static int so_symbol_index(so_module *mod, const char *symbol)
 }
 
 /*
- * alloc_arena: allocates space on either patch or cave arenas, 
+ * alloc_arena: allocates space on either patch or cave arenas,
  * range: maximum range from allocation to dst (ignored if NULL)
  * dst: destination address
 */
@@ -597,7 +594,7 @@ static void trampoline_ldm(so_module *mod, uint32_t *dst) {
 	int baseReg = ((*dst) >> 16) & 0xF;
 	int bitMask = (*dst) & 0xFFFF;
 
-	uint32_t stored = NULL;
+	uint32_t stored = (uint32_t) NULL;
 	for (int i = 0; i < 16; i++) {
 		if (bitMask & (1 << i)) {
 			// If the register we're reading the offset from is the same as the one we're writing,
@@ -615,8 +612,8 @@ static void trampoline_ldm(so_module *mod, uint32_t *dst) {
 		*ptr++ = stored;
 	}
 
-	*ptr++ = 0xe51ff004; // LDR PC, [PC, -0x4] ; jmp to [dst+0x4]
-	*ptr++ = dst+1; // .dword <...>	; [dst+0x4]
+	*ptr++ = (uint32_t) 0xe51ff004; // LDR PC, [PC, -0x4] ; jmp to [dst+0x4]
+	*ptr++ = (uint32_t) dst+1; // .dword <...>	; [dst+0x4]
 
 	size_t trampoline_sz =	((uintptr_t)ptr - (uintptr_t)&funct[0]);
 	uintptr_t patch_addr = so_alloc_arena(mod, B_RANGE, B_OFFSET(dst), trampoline_sz);
@@ -635,7 +632,7 @@ static void trampoline_ldm(so_module *mod, uint32_t *dst) {
 uintptr_t so_symbol(so_module *mod, const char *symbol) {
 	int index = so_symbol_index(mod, symbol);
 	if (index == -1)
-		return NULL;
+		return (uint32_t) NULL;
 
 	return mod->load_addr + mod->dynsym[index].st_value;
 }
@@ -658,7 +655,7 @@ void so_symbol_fix_ldmia(so_module *mod, const char *symbol) {
 		//Is this an LDMIA instruction with a R0-R12 base register?
 		if (((inst & 0xFFF00000) == 0xE8900000) && (((inst >> 16) & 0xF) < 13) ) {
 			sceClibPrintf("Found possibly misaligned LDMIA on 0x%08X, trying to fix it... (instr: 0x%08X, to 0x%08X)\n", addr, *(uint32_t*)addr, mod->patch_head);
-			trampoline_ldm(mod, addr);
+			trampoline_ldm(mod, (uint32_t *) addr);
 		}
 	}
 }

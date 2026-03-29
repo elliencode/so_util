@@ -14,39 +14,39 @@ typedef struct {
 } so_hook;
 
 typedef struct so_module {
-  struct so_module *next;
+	struct so_module *next;
 
-  SceUID patch_blockid, text_blockid, data_blockid[MAX_DATA_SEG];
-  uintptr_t patch_base, patch_head, cave_base, cave_head, text_base, load_addr, data_base[MAX_DATA_SEG];
-  size_t patch_size, cave_size, text_size, data_size[MAX_DATA_SEG];
-  int n_data;
+	SceUID patch_blockid, text_blockid, data_blockid[MAX_DATA_SEG];
+	uintptr_t patch_base, patch_head, cave_base, cave_head, text_base, load_addr, data_base[MAX_DATA_SEG];
+	size_t patch_size, cave_size, text_size, data_size[MAX_DATA_SEG];
+	int n_data;
 
-  Elf32_Ehdr *ehdr;
-  Elf32_Phdr *phdr;
-  Elf32_Shdr *shdr;
+	Elf32_Ehdr *ehdr;
+	Elf32_Phdr *phdr;
+	Elf32_Shdr *shdr;
 
-  Elf32_Dyn *dynamic;
-  Elf32_Sym *dynsym;
-  Elf32_Rel *reldyn;
-  Elf32_Rel *relplt;
+	Elf32_Dyn *dynamic;
+	Elf32_Sym *dynsym;
+	Elf32_Rel *reldyn;
+	Elf32_Rel *relplt;
 
-  int (** init_array)(void);
-  uint32_t *hash;
+	int (** init_array)(void);
+	uint32_t *hash;
 
-  int num_dynamic;
-  int num_dynsym;
-  int num_reldyn;
-  int num_relplt;
-  int num_init_array;
+	int num_dynamic;
+	int num_dynsym;
+	int num_reldyn;
+	int num_relplt;
+	int num_init_array;
 
-  char *soname;
-  char *shstr;
-  char *dynstr;
+	char *soname;
+	char *shstr;
+	char *dynstr;
 } so_module;
 
 typedef struct {
-  char *symbol;
-  uintptr_t func;
+	char *symbol;
+	uintptr_t func;
 } so_default_dynlib;
 
 so_hook hook_thumb(uintptr_t addr, uintptr_t dst);
@@ -64,12 +64,12 @@ void so_initialize(so_module *mod);
 uintptr_t so_symbol(so_module *mod, const char *symbol);
 
 #define SO_CONTINUE(type, h, ...) ({ \
-  sceClibMemcpy((void *)h.addr, h.orig_instr, sizeof(h.orig_instr)); \
-  kuKernelFlushCaches((void *)h.addr, sizeof(h.orig_instr)); \
-  type r = h.thumb_addr ? ((type(*)())h.thumb_addr)(__VA_ARGS__) : ((type(*)())h.addr)(__VA_ARGS__); \
-  sceClibMemcpy((void *)h.addr, h.patch_instr, sizeof(h.patch_instr)); \
-  kuKernelFlushCaches((void *)h.addr, sizeof(h.patch_instr)); \
-  r; \
+	sceClibMemcpy((void *)h.addr, h.orig_instr, sizeof(h.orig_instr)); \
+	kuKernelFlushCaches((void *)h.addr, sizeof(h.orig_instr)); \
+	type r = h.thumb_addr ? ((type(*)())h.thumb_addr)(__VA_ARGS__) : ((type(*)())h.addr)(__VA_ARGS__); \
+	sceClibMemcpy((void *)h.addr, h.patch_instr, sizeof(h.patch_instr)); \
+	kuKernelFlushCaches((void *)h.addr, sizeof(h.patch_instr)); \
+	r; \
 })
 
 #endif
