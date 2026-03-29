@@ -2,6 +2,7 @@
 #define __SO_UTIL_H__
 
 #include "elf.h"
+#include <psp2common/types.h>
 
 #define ALIGN_MEM(x, align) (((x) + ((align) - 1)) & ~((align) - 1))
 #define MAX_DATA_SEG 4
@@ -30,14 +31,14 @@ typedef struct so_module {
 	Elf32_Rel *reldyn;
 	Elf32_Rel *relplt;
 
-	int (** init_array)(void);
+	void (** init_array)(void);
 	uint32_t *hash;
 
-	int num_dynamic;
-	int num_dynsym;
-	int num_reldyn;
-	int num_relplt;
-	int num_init_array;
+	uint32_t num_dynamic;
+	uint32_t num_dynsym;
+	uint32_t num_reldyn;
+	uint32_t num_relplt;
+	uint32_t num_init_array;
 
 	char *soname;
 	char *shstr;
@@ -45,7 +46,7 @@ typedef struct so_module {
 } so_module;
 
 typedef struct {
-	char *symbol;
+	const char *symbol;
 	uintptr_t func;
 } so_default_dynlib;
 
@@ -53,15 +54,15 @@ so_hook hook_thumb(uintptr_t addr, uintptr_t dst);
 so_hook hook_arm(uintptr_t addr, uintptr_t dst);
 so_hook hook_addr(uintptr_t addr, uintptr_t dst);
 
-void so_flush_caches(so_module *mod);
+void so_flush_caches(const so_module *mod);
 int so_file_load(so_module *mod, const char *filename, uintptr_t load_addr);
-int so_mem_load(so_module *mod, void * buffer, size_t so_size, uintptr_t load_addr);
-int so_relocate(so_module *mod);
-int so_resolve(so_module *mod, so_default_dynlib *default_dynlib, int size_default_dynlib, int default_dynlib_only);
-int so_resolve_with_dummy(so_module *mod, so_default_dynlib *default_dynlib, int size_default_dynlib, int default_dynlib_only);
+int so_mem_load(so_module *mod, const void * buffer, size_t so_size, uintptr_t load_addr);
+int so_relocate(const so_module *mod);
+int so_resolve(const so_module *mod, const so_default_dynlib *default_dynlib, int size_default_dynlib, int default_dynlib_only);
+int so_resolve_with_dummy(const so_module *mod, const so_default_dynlib *default_dynlib, int size_default_dynlib, int default_dynlib_only);
 void so_symbol_fix_ldmia(so_module *mod, const char *symbol);
-void so_initialize(so_module *mod);
-uintptr_t so_symbol(so_module *mod, const char *symbol);
+void so_initialize(const so_module *mod);
+uintptr_t so_symbol(const so_module *mod, const char *symbol);
 
 #define SO_CONTINUE(type, h, ...) ({ \
 	sceClibMemcpy((void *)h.addr, h.orig_instr, sizeof(h.orig_instr)); \

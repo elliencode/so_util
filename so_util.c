@@ -12,6 +12,9 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <psp2/io/fcntl.h>
+#include <psp2/kernel/clib.h>
+
 #include <kubridge.h>
 
 typedef struct b_enc {
@@ -52,8 +55,12 @@ typedef struct ldst_enc {
 #define PATCH_SZ 0x10000 //64 KB-ish arenas
 static so_module *head = NULL, *tail = NULL;
 
+static int _so_util_ret0(void) {
+	return 0;
+}
+
 so_hook hook_thumb(uintptr_t addr, uintptr_t dst) {
-	so_hook h;
+	so_hook h = {0};
 	sceClibPrintf("THUMB HOOK\n");
 	if (addr == 0)
 		return h;
@@ -76,11 +83,10 @@ so_hook hook_thumb(uintptr_t addr, uintptr_t dst) {
 
 so_hook hook_arm(uintptr_t addr, uintptr_t dst) {
 	sceClibPrintf("ARM HOOK\n");
-	so_hook h;
+	so_hook h = {0};
 	if (addr == 0) {
 		return h;
 	}
-	uint32_t hook[2];
 	h.thumb_addr = 0;
 	h.addr = addr;
 	h.patch_instr[0] = 0xe51ff004; // LDR PC, [PC, #-0x4]
@@ -98,12 +104,12 @@ so_hook hook_addr(uintptr_t addr, uintptr_t dst) {
 		return hook_arm(addr, dst);
 }
 
-void so_flush_caches(so_module *mod) {
+void so_flush_caches(const so_module *mod) {
 	//sceClibPrintf("Flushing cache on addr: %x size: %u\n", mod->text_base, mod->text_size);
 	kuKernelFlushCaches((void *)mod->text_base, mod->text_size);
 }
 
-int _so_load(so_module *mod, SceUID so_blockid, void *so_data, uintptr_t load_addr) {
+static int so_load_internal(so_module *mod, SceUID so_blockid, void *so_data, uintptr_t load_addr) {
 	int res = 0;
 	uintptr_t data_addr = load_addr;
 	
@@ -139,8 +145,8 @@ int _so_load(so_module *mod, SceUID so_blockid, void *so_data, uintptr_t load_ad
 				if (res < 0)
 					goto err_free_so;
 
-				sceKernelGetMemBlockBase(mod->patch_blockid, &mod->patch_base);
-				kuKernelMemProtect(mod->patch_base, mod->patch_size, KU_KERNEL_PROT_EXEC | KU_KERNEL_PROT_WRITE | KU_KERNEL_PROT_READ);
+				sceKernelGetMemBlockBase(mod->patch_blockid, (void **) &mod->patch_base);
+				kuKernelMemProtect((void *) mod->patch_base, mod->patch_size, KU_KERNEL_PROT_EXEC | KU_KERNEL_PROT_WRITE | KU_KERNEL_PROT_READ);
 				mod->patch_head = mod->patch_base;
 				
 				prog_size = ALIGN_MEM(mod->phdr[i].p_memsz + mod->phdr[i].p_vaddr - (data_addr - load_addr), mod->phdr[i].p_align);
@@ -180,8 +186,7 @@ int _so_load(so_module *mod, SceUID so_blockid, void *so_data, uintptr_t load_ad
 				mod->phdr[i].p_vaddr += load_addr;
 				//sceClibPrintf("Data segment: vaddr: %x (data addr: %x) size: %u\n", mod->phdr[i].p_vaddr, data_addr, mod->phdr[i].p_memsz);
 				
-				SceKernelAllocMemBlockKernelOpt opt;
-				memset(&opt, 0, sizeof(SceKernelAllocMemBlockKernelOpt));
+				SceKernelAllocMemBlockKernelOpt opt = {0};
 				opt.size = sizeof(SceKernelAllocMemBlockKernelOpt);
 				opt.attr = 0x1;
 				opt.field_C = data_addr;
@@ -208,21 +213,21 @@ int _so_load(so_module *mod, SceUID so_blockid, void *so_data, uintptr_t load_ad
 		size_t sh_size = mod->shdr[i].sh_size;
 		if (strcmp(sh_name, ".dynamic") == 0) {
 			mod->dynamic = (Elf32_Dyn *)sh_addr;
-			mod->num_dynamic = sh_size / sizeof(Elf32_Dyn);
+			mod->num_dynamic = (uint32_t)(sh_size / sizeof(Elf32_Dyn));
 		} else if (strcmp(sh_name, ".dynstr") == 0) {
 			mod->dynstr = (char *)sh_addr;
 		} else if (strcmp(sh_name, ".dynsym") == 0) {
 			mod->dynsym = (Elf32_Sym *)sh_addr;
-			mod->num_dynsym = sh_size / sizeof(Elf32_Sym);
+			mod->num_dynsym = (uint32_t)(sh_size / sizeof(Elf32_Sym));
 		} else if (strcmp(sh_name, ".rel.dyn") == 0) {
 			mod->reldyn = (Elf32_Rel *)sh_addr;
-			mod->num_reldyn = sh_size / sizeof(Elf32_Rel);
+			mod->num_reldyn = (uint32_t)(sh_size / sizeof(Elf32_Rel));
 		} else if (strcmp(sh_name, ".rel.plt") == 0) {
 			mod->relplt = (Elf32_Rel *)sh_addr;
-			mod->num_relplt = sh_size / sizeof(Elf32_Rel);
+			mod->num_relplt = (uint32_t)(sh_size / sizeof(Elf32_Rel));
 		} else if (strcmp(sh_name, ".init_array") == 0) {
-			mod->init_array = (void *)sh_addr;
-			mod->num_init_array = sh_size / sizeof(void *);
+			mod->init_array = (void (**)(void))sh_addr;
+			mod->num_init_array = (uint32_t)(sh_size / sizeof(void *));
 		} else if (strcmp(sh_name, ".hash") == 0) {
 			mod->hash = (void *)sh_addr;
 		}
@@ -237,7 +242,7 @@ int _so_load(so_module *mod, SceUID so_blockid, void *so_data, uintptr_t load_ad
 		goto err_free_data;
 	}
 
-	for (int i = 0; i < mod->num_dynamic; i++) {
+	for (uint32_t i = 0; i < mod->num_dynamic; i++) {
 		switch (mod->dynamic[i].d_tag) {
 		case DT_SONAME:
 			mod->soname = mod->dynstr + mod->dynamic[i].d_un.d_ptr;
@@ -270,26 +275,21 @@ err_free_so:
 	return res;
 }
 
-int so_mem_load(so_module *mod, void *buffer, size_t so_size, uintptr_t load_addr) {
-	SceUID so_blockid;
-	void *so_data;
-
+int so_mem_load(so_module *mod, const void *buffer, size_t so_size, uintptr_t load_addr) {
 	memset(mod, 0, sizeof(so_module));
 
-	so_blockid = sceKernelAllocMemBlock("so block", SCE_KERNEL_MEMBLOCK_TYPE_USER_RW, (so_size + 0xfff) & ~0xfff, NULL);
+	SceUID so_blockid = sceKernelAllocMemBlock("so block", SCE_KERNEL_MEMBLOCK_TYPE_USER_RW, (so_size + 0xfff) & ~0xfff, NULL);
 	if (so_blockid < 0)
 		return so_blockid;
 
+	void *so_data;
 	sceKernelGetMemBlockBase(so_blockid, &so_data);
 	sceClibMemcpy(so_data, buffer, so_size);
-	
-	return _so_load(mod, so_blockid, so_data, load_addr);
+
+	return so_load_internal(mod, so_blockid, so_data, load_addr);
 }
 
 int so_file_load(so_module *mod, const char *filename, uintptr_t load_addr) {
-	SceUID so_blockid;
-	void *so_data;
-
 	memset(mod, 0, sizeof(so_module));
 
 	SceUID fd = sceIoOpen(filename, SCE_O_RDONLY, 0);
@@ -299,21 +299,21 @@ int so_file_load(so_module *mod, const char *filename, uintptr_t load_addr) {
 	size_t so_size = sceIoLseek(fd, 0, SCE_SEEK_END);
 	sceIoLseek(fd, 0, SCE_SEEK_SET);
 
-	so_blockid = sceKernelAllocMemBlock("so block", SCE_KERNEL_MEMBLOCK_TYPE_USER_RW, (so_size + 0xfff) & ~0xfff, NULL);
+	SceUID so_blockid = sceKernelAllocMemBlock("so block", SCE_KERNEL_MEMBLOCK_TYPE_USER_RW, (so_size + 0xfff) & ~0xfff, NULL);
 	if (so_blockid < 0)
 		return so_blockid;
 
+	void *so_data;
 	sceKernelGetMemBlockBase(so_blockid, &so_data);
 
 	sceIoRead(fd, so_data, so_size);
 	sceIoClose(fd);
 
-	return _so_load(mod, so_blockid, so_data, load_addr);
+	return so_load_internal(mod, so_blockid, so_data, load_addr);
 }
 
-int so_relocate(so_module *mod) {
-	uintptr_t val;
-	for (int i = 0; i < mod->num_reldyn + mod->num_relplt; i++) {
+int so_relocate(const so_module *mod) {
+	for (uint32_t i = 0; i < mod->num_reldyn + mod->num_relplt; i++) {
 		Elf32_Rel *rel = i < mod->num_reldyn ? &mod->reldyn[i] : &mod->relplt[i - mod->num_reldyn];
 		Elf32_Sym *sym = &mod->dynsym[ELF32_R_SYM(rel->r_info)];
 		uintptr_t *ptr = (uintptr_t *)(mod->load_addr + rel->r_offset);
@@ -350,11 +350,9 @@ int so_relocate(so_module *mod) {
 	return 0;
 }
 
-uintptr_t so_resolve_link(so_module *mod, const char *symbol) {
-	for (int i = 0; i < mod->num_dynamic; i++) {
-		switch (mod->dynamic[i].d_tag) {
-		case DT_NEEDED:
-		{
+uintptr_t so_resolve_link(const so_module *mod, const char *symbol) {
+	for (uint32_t i = 0; i < mod->num_dynamic; i++) {
+		if (mod->dynamic[i].d_tag == DT_NEEDED) {
 			so_module *curr = head;
 			while (curr) {
 				if (curr != mod && strcmp(curr->soname, mod->dynstr + mod->dynamic[i].d_un.d_ptr) == 0) {
@@ -364,18 +362,13 @@ uintptr_t so_resolve_link(so_module *mod, const char *symbol) {
 				}
 				curr = curr->next;
 			}
-
-			break;
-		}
-		default:
-			break;
 		}
 	}
 
 	return 0;
 }
 
-void reloc_err(uintptr_t got0)
+__attribute__((noreturn)) void reloc_err(uintptr_t got0)
 {
 	// Find to which module this missing symbol belongs
 	int found = 0;
@@ -384,43 +377,39 @@ void reloc_err(uintptr_t got0)
 		for (int i = 0; i < curr->n_data; i++)
 			if ((got0 >= curr->data_base[i]) && (got0 <= (uintptr_t)(curr->data_base[i] + curr->data_size[i])))
 				found = 1;
-		
+
 		if (!found)
 			curr = curr->next;
 	}
 
 	if (curr) {
 		// Attempt to find symbol name and then display error
-		for (int i = 0; i < curr->num_reldyn + curr->num_relplt; i++) {
+		for (uint32_t i = 0; i < curr->num_reldyn + curr->num_relplt; i++) {
 			Elf32_Rel *rel = i < curr->num_reldyn ? &curr->reldyn[i] : &curr->relplt[i - curr->num_reldyn];
 			Elf32_Sym *sym = &curr->dynsym[ELF32_R_SYM(rel->r_info)];
 			uintptr_t *ptr = (uintptr_t *)(curr->load_addr + rel->r_offset);
 
-			int type = ELF32_R_TYPE(rel->r_info);
-			switch (type) {
-				case R_ARM_JUMP_SLOT:
-				{
-					if (got0 == (uintptr_t)ptr) {
-						sceClibPrintf("Unknown symbol \"%s\" (%p).\n", curr->dynstr + sym->st_name, (void*)got0);
-					}
-					break;
-				}
+			if (ELF32_R_TYPE(rel->r_info) == R_ARM_JUMP_SLOT && got0 == (uintptr_t)ptr) {
+				sceClibPrintf("Unknown symbol \"%s\" (%p).\n", curr->dynstr + sym->st_name, (void*)got0);
 			}
 		}
 	}
 
 	// Ooops, this shouldn't have happened.
 	sceClibPrintf("Unknown symbol \"???\" (%p).\n", (void*)got0);
+	sceClibAbort();
+	__builtin_unreachable();
 }
 
-__attribute__((naked)) void plt0_stub()
-{
-	register uintptr_t got0 asm("r12");
-	reloc_err(got0);
+__attribute__((naked)) void plt0_stub() {
+	__asm__ volatile (
+		"mov r0, r12\n"
+		"b reloc_err\n"
+	);
 }
 
-int so_resolve(so_module *mod, so_default_dynlib *default_dynlib, int size_default_dynlib, int default_dynlib_only) {
-	for (int i = 0; i < mod->num_reldyn + mod->num_relplt; i++) {
+int so_resolve(const so_module *mod, const so_default_dynlib *default_dynlib, int size_default_dynlib, int default_dynlib_only) {
+	for (uint32_t i = 0; i < mod->num_reldyn + mod->num_relplt; i++) {
 		Elf32_Rel *rel = i < mod->num_reldyn ? &mod->reldyn[i] : &mod->relplt[i - mod->num_reldyn];
 		Elf32_Sym *sym = &mod->dynsym[ELF32_R_SYM(rel->r_info)];
 		uintptr_t *ptr = (uintptr_t *)(mod->load_addr + rel->r_offset);
@@ -446,21 +435,12 @@ int so_resolve(so_module *mod, so_default_dynlib *default_dynlib, int size_defau
 				}
 				
 				if (!resolved) {
-					for (int j = 0; j < size_default_dynlib / sizeof(so_default_dynlib); j++) {
+					for (int j = 0; j < size_default_dynlib / (int)sizeof(so_default_dynlib); j++) {
 						if (strcmp(mod->dynstr + sym->st_name, default_dynlib[j].symbol) == 0) {
 							*ptr = default_dynlib[j].func;
 							resolved = 1;
 							break;
 						}
-					}
-				}
-				
-				if (!resolved) {
-					void *f = vglGetProcAddress(mod->dynstr + sym->st_name);
-					if (f) {
-						*ptr = f;
-						resolved = 1;
-						break;
 					}
 				}
 
@@ -470,7 +450,7 @@ int so_resolve(so_module *mod, so_default_dynlib *default_dynlib, int size_defau
 						*ptr = (uintptr_t)&plt0_stub;
 					}
 					else {
-						//printf("Unresolved import: %s\n", mod->dynstr + sym->st_name);
+						sceClibPrintf("Unresolved import: %s\n", mod->dynstr + sym->st_name);
 					}
 				}
 			}
@@ -485,8 +465,8 @@ int so_resolve(so_module *mod, so_default_dynlib *default_dynlib, int size_defau
 	return 0;
 }
 
-int so_resolve_with_dummy(so_module *mod, so_default_dynlib *default_dynlib, int size_default_dynlib, int default_dynlib_only) {
-	for (int i = 0; i < mod->num_reldyn + mod->num_relplt; i++) {
+int so_resolve_with_dummy(const so_module *mod, const so_default_dynlib *default_dynlib, int size_default_dynlib, int default_dynlib_only) {
+	for (uint32_t i = 0; i < mod->num_reldyn + mod->num_relplt; i++) {
 		Elf32_Rel *rel = i < mod->num_reldyn ? &mod->reldyn[i] : &mod->relplt[i - mod->num_reldyn];
 		Elf32_Sym *sym = &mod->dynsym[ELF32_R_SYM(rel->r_info)];
 		uintptr_t *ptr = (uintptr_t *)(mod->load_addr + rel->r_offset);
@@ -500,7 +480,7 @@ int so_resolve_with_dummy(so_module *mod, so_default_dynlib *default_dynlib, int
 			if (sym->st_shndx == SHN_UNDEF) {
 				for (int j = 0; j < size_default_dynlib / sizeof(so_default_dynlib); j++) {
 					if (strcmp(mod->dynstr + sym->st_name, default_dynlib[j].symbol) == 0) {
-						*ptr = &ret0;
+						*ptr = (uintptr_t) &_so_util_ret0;
 						break;
 					}
 				}
@@ -516,9 +496,9 @@ int so_resolve_with_dummy(so_module *mod, so_default_dynlib *default_dynlib, int
 	return 0;
 }
 
-void so_initialize(so_module *mod) {
-	for (int i = 0; i < mod->num_init_array; i++) {
-		if (mod->init_array[i] && (int)mod->init_array[i] != -1)
+void so_initialize(const so_module *mod) {
+	for (uint32_t i = 0; i < mod->num_init_array; i++) {
+		if (mod->init_array[i] && mod->init_array[i] != (void (*)(void))-1)
 			mod->init_array[i]();
 	}
 }
@@ -534,26 +514,26 @@ uint32_t so_hash(const uint8_t *name) {
 	return h;
 }
 
-static int so_symbol_index(so_module *mod, const char *symbol)
+static int so_symbol_index(const so_module *mod, const char *symbol)
 {
 	if (mod->hash) {
 		uint32_t hash = so_hash((const uint8_t *)symbol);
 		uint32_t nbucket = mod->hash[0];
 		uint32_t *bucket = &mod->hash[2];
 		uint32_t *chain = &bucket[nbucket];
-		for (int i = bucket[hash % nbucket]; i; i = chain[i]) {
+		for (uint32_t i = bucket[hash % nbucket]; i; i = chain[i]) {
 			if (mod->dynsym[i].st_shndx == SHN_UNDEF)
 				continue;
 			if (mod->dynsym[i].st_info != SHN_UNDEF && strcmp(mod->dynstr + mod->dynsym[i].st_name, symbol) == 0)
-				return i;
+				return (int)i;
 		}
 	}
 
-	for (int i = 0; i < mod->num_dynsym; i++) {
+	for (uint32_t i = 0; i < mod->num_dynsym; i++) {
 		if (mod->dynsym[i].st_shndx == SHN_UNDEF)
 			continue;
 		if (mod->dynsym[i].st_info != SHN_UNDEF && strcmp(mod->dynstr + mod->dynsym[i].st_name, symbol) == 0)
-			return i;
+			return (int)i;
 	}
 
 	return -1;
@@ -591,8 +571,8 @@ static void trampoline_ldm(so_module *mod, uint32_t *dst) {
 	uint32_t *ptr = funct;
 
 	int cur = 0;
-	int baseReg = ((*dst) >> 16) & 0xF;
-	int bitMask = (*dst) & 0xFFFF;
+	int baseReg = (int)(((*dst) >> 16) & 0xF);
+	int bitMask = (int)((*dst) & 0xFFFF);
 
 	uint32_t stored = (uint32_t) NULL;
 	for (int i = 0; i < 16; i++) {
@@ -616,10 +596,11 @@ static void trampoline_ldm(so_module *mod, uint32_t *dst) {
 	*ptr++ = (uint32_t) dst+1; // .dword <...>	; [dst+0x4]
 
 	size_t trampoline_sz =	((uintptr_t)ptr - (uintptr_t)&funct[0]);
-	uintptr_t patch_addr = so_alloc_arena(mod, B_RANGE, B_OFFSET(dst), trampoline_sz);
+	uintptr_t patch_addr = so_alloc_arena(mod, B_RANGE, (uintptr_t) B_OFFSET(dst), trampoline_sz);
 
 	if (!patch_addr) {
-		fatal_error("Failed to patch LDMIA at 0x%08X, unable to allocate space.\n", dst);
+		sceClibPrintf("Failed to patch LDMIA at %p, unable to allocate space.\n", dst);
+		return;
 	}
 	
 	// Create sign extended relative address rel_addr
@@ -629,7 +610,7 @@ static void trampoline_ldm(so_module *mod, uint32_t *dst) {
 	sceClibMemcpy(dst, trampoline, sizeof(trampoline));
 }
 
-uintptr_t so_symbol(so_module *mod, const char *symbol) {
+uintptr_t so_symbol(const so_module *mod, const char *symbol) {
 	int index = so_symbol_index(mod, symbol);
 	if (index == -1)
 		return (uint32_t) NULL;
